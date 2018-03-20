@@ -431,6 +431,19 @@ describe('TraceKit', function() {
       });
     });
 
+    it('should parse Chrome Extension errors', function() {
+      var stackFrames = TraceKit.computeStackTrace(CapturedExceptions.CHROME_EXTENSION);
+      assert.ok(stackFrames);
+      assert.deepEqual(stackFrames.stack.length, 1);
+      assert.deepEqual(stackFrames.stack[0], {
+        url: 'chrome-extension://negengibeecgiokdifncekejdgkcoono/content-script-main.js',
+        func: '?',
+        args: [],
+        line: 93,
+        column: 12
+      });
+    });
+
     it('should parse nested eval() from Chrome', function() {
       var stackFrames = TraceKit.computeStackTrace(CapturedExceptions.CHROME_48_EVAL);
       assert.ok(stackFrames);
@@ -788,6 +801,21 @@ describe('TraceKit', function() {
       });
     });
 
+    it('should parse Firefox Extension errors', function() {
+      var stackFrames = TraceKit.computeStackTrace(
+        CapturedExceptions.FIREFOX_MOZ_EXTENSION
+      );
+      assert.ok(stackFrames);
+      assert.deepEqual(stackFrames.stack.length, 3);
+      assert.deepEqual(stackFrames.stack[0], {
+        url: 'moz-extension://path/data/content/bundle.js',
+        func: 'render',
+        args: [],
+        line: 5529,
+        column: 16
+      });
+    });
+
     it('should parse React Native errors on Android', function() {
       var stackFrames = TraceKit.computeStackTrace(
         CapturedExceptions.ANDROID_REACT_NATIVE
@@ -851,6 +879,19 @@ describe('TraceKit', function() {
         args: [],
         line: 295,
         column: 108
+      });
+    });
+
+    it('should parse custom errors', function() {
+      var stackFrames = TraceKit.computeStackTrace(CapturedExceptions.CUSTOM_ERROR);
+      assert.ok(stackFrames);
+      assert.deepEqual(stackFrames.stack.length, 1);
+      assert.deepEqual(stackFrames.stack[0], {
+        url: 'file:///path/to/file.js',
+        func: '?',
+        args: [],
+        line: 19,
+        column: 40
       });
     });
   });

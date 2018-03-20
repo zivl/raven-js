@@ -6,17 +6,26 @@ var sinon = require('sinon');
 var chai = require('chai');
 var assert = chai.assert;
 
-var _Raven = require('../src/raven');
-_Raven.prototype._getUuid = function() {
-  return 'abc123'; // Mock in order to get a predictable UUID
-};
+var proxyquire = require('proxyquireify')(require);
 
 var TraceKit = require('../vendor/TraceKit/tracekit');
+
+var _Raven = proxyquire('../src/raven', {
+  // Ensure same TraceKit obj is shared (without specifying this, proxyquire
+  // seems to clone dependencies or something weird)
+  '../vendor/TraceKit/tracekit': TraceKit
+});
+
+_Raven.prototype._getUuid = function() {
+  return 'abc123';
+};
 
 var utils = require('../src/utils');
 var joinRegExp = utils.joinRegExp;
 var supportsErrorEvent = utils.supportsErrorEvent;
 var supportsFetch = utils.supportsFetch;
+var supportsReferrerPolicy = utils.supportsReferrerPolicy;
+var supportsPromiseRejectionEvent = utils.supportsPromiseRejectionEvent;
 
 // window.console must be stubbed in for browsers that don't have it
 if (typeof window.console === 'undefined') {
@@ -748,6 +757,40 @@ describe('globals', function() {
     });
   });
 
+  if (supportsPromiseRejectionEvent()) {
+    describe('captureUnhandledRejections', function() {
+      it('should capture string rejections', function(done) {
+        Raven._attachPromiseRejectionHandler();
+
+        this.sinon.stub(Raven, 'captureException').callsFake(function(reason) {
+          assert.equal(reason, 'foo');
+          Raven._detachPromiseRejectionHandler();
+          done();
+        });
+
+        new Promise(function(resolve, reject) {
+          reject('foo');
+        });
+      });
+
+      it('should capture error rejections', function(done) {
+        var err = new Error('foo');
+
+        Raven._attachPromiseRejectionHandler();
+
+        this.sinon.stub(Raven, 'captureException').callsFake(function(reason) {
+          assert.equal(reason, err);
+          Raven._detachPromiseRejectionHandler();
+          done();
+        });
+
+        new Promise(function(resolve, reject) {
+          reject(err);
+        });
+      });
+    });
+  }
+
   describe('send', function() {
     it('should build a good data payload', function() {
       this.sinon.stub(Raven, 'isSetup').returns(true);
@@ -1306,7 +1349,7 @@ describe('globals', function() {
         extra: {'session:duration': 100}
       });
       assert.deepEqual(opts.auth, {
-        sentry_client: 'raven-js/3.22.1',
+        sentry_client: 'raven-js/3.23.3',
         sentry_key: 'abc',
         sentry_version: '7'
       });
@@ -1353,7 +1396,7 @@ describe('globals', function() {
         extra: {'session:duration': 100}
       });
       assert.deepEqual(opts.auth, {
-        sentry_client: 'raven-js/3.22.1',
+        sentry_client: 'raven-js/3.23.3',
         sentry_key: 'abc',
         sentry_secret: 'def',
         sentry_version: '7'
@@ -1777,7 +1820,7 @@ describe('globals', function() {
             'http://localhost/?a=1&b=2',
             {
               keepalive: true,
-              referrerPolicy: 'origin',
+              referrerPolicy: supportsReferrerPolicy() ? 'origin' : '',
               method: 'POST',
               body: '{"foo":"bar"}'
             }
@@ -2339,6 +2382,29 @@ describe('Raven (public API)', function() {
       });
     });
 
+    describe('captureUnhandledRejections', function() {
+      it('should be true by default', function() {
+        Raven.config(SENTRY_DSN);
+        assert.isTrue(Raven._globalOptions.captureUnhandledRejections);
+      });
+
+      it('should be true if set to true', function() {
+        Raven.config(SENTRY_DSN, {
+          captureUnhandledRejections: true
+        });
+
+        assert.isTrue(Raven._globalOptions.captureUnhandledRejections);
+      });
+
+      it('should be false if set to false', function() {
+        Raven.config(SENTRY_DSN, {
+          captureUnhandledRejections: false
+        });
+
+        assert.isFalse(Raven._globalOptions.captureUnhandledRejections);
+      });
+    });
+
     describe('maxBreadcrumbs', function() {
       it('should override the default', function() {
         Raven.config(SENTRY_DSN, {maxBreadcrumbs: 50});
@@ -2503,7 +2569,7 @@ describe('Raven (public API)', function() {
       }, error);
     });
 
-    it('should return input function as-is if accessing __raven__ prop throws exception', function() {
+    it('should return input funciton as-is if accessing __raven__ prop throws exception', function() {
       // see raven-js#495
       var fn = function() {};
       Object.defineProperty(fn, '__raven__', {
@@ -2512,13 +2578,13 @@ describe('Raven (public API)', function() {
         }
       });
       assert.throw(function() {
-        return fn.__raven__;
+        fn.__raven__;
       }, 'Permission denied');
       var wrapped = Raven.wrap(fn);
       assert.equal(fn, wrapped);
     });
 
-    it('should return input function as-is if accessing __raven_wrapper__ prop throws exception', function() {
+    it('should return input funciton as-is if accessing __raven_wrapper__ prop throws exception', function() {
       // see raven-js#495
       var fn = function() {};
       Object.defineProperty(fn, '__raven_wrapper__', {
@@ -2527,7 +2593,7 @@ describe('Raven (public API)', function() {
         }
       });
       assert.throw(function() {
-        return fn.__raven_wrapper__;
+        fn.__raven_wrapper__;
       }, 'Permission denied');
       var wrapped = Raven.wrap(fn);
       assert.equal(fn, wrapped);
@@ -2978,6 +3044,19 @@ describe('Raven (public API)', function() {
         var frames = Raven._send.lastCall.args[0].stacktrace.frames;
         assertSynthetic(frames);
       });
+
+      it('should send a default fingerprint if stacktrace:true is set via globalOptions', function() {
+        this.sinon.stub(Raven, 'isSetup').returns(true);
+        this.sinon.stub(Raven, '_send');
+
+        Raven._globalOptions.stacktrace = true;
+        Raven.captureMessage('foo');
+
+        var fingerprint = Raven._send.lastCall.args[0].fingerprint;
+        // the fingerprint should be the same as the message
+        // but wrapped in an array
+        assert.deepEqual(fingerprint, ['foo']);
+      });
     });
   });
 
@@ -2987,8 +3066,10 @@ describe('Raven (public API)', function() {
         var error = new ErrorEvent('pickleRick', {error: new Error('pickleRick')});
         this.sinon.stub(Raven, 'isSetup').returns(true);
         this.sinon.stub(Raven, '_handleStackInfo');
+        this.sinon.spy(Raven, '_getCaptureExceptionOptionsFromPlainObject');
         Raven.captureException(error, {foo: 'bar'});
         assert.isTrue(Raven._handleStackInfo.calledOnce);
+        assert.isFalse(Raven._getCaptureExceptionOptionsFromPlainObject.called);
       });
 
       it('should send ErrorEvents without Errors as messages', function() {
@@ -3000,11 +3081,42 @@ describe('Raven (public API)', function() {
       });
     }
 
-    it('should send non-Errors as messages', function() {
+    it("should treat Schrodinger's Error in the same way as regular Error", function() {
+      // Schrodinger's Error is an object that is and is not an Error at the same time
+      // Like... error, but not really.
+      // But error.
+      //
+      // To be more exact, it's an object literal or an instance of constructor function
+      // that has it's prototype set to the Error object itself.
+      // When using `isPlanObject`, which makes a call to `Object.prototype.toString`,
+      // it returns `[object Object]`, because any instance created with `new X`
+      // where X is a custom constructor like `function X () {}`, it's return value
+      // is an object literal.
+      // However, because it has it's prototype set to an Error object,
+      // when using `instanceof Error` check, it returns `true`, because calls
+      // like this, are always going up the prototype chain and will verify
+      // all possible constructors. For example:
+      //
+      // class Foo extends Bar {}
+      // class Bar extends Error {}
+      //
+      // var foo = new Foo();
+      //
+      // and now `foo` is instance of every "extension" ever created in the chain
+      //
+      // foo instanceof Foo; // true
+      // foo instanceof Bar; // true (because Foo extends Bar)
+      // foo instanceof Error; // true (because Foo extends Bar that extends Error)
+
+      function SchrodingersError() {}
+      SchrodingersError.prototype = new Error("Schrödinger's cat was here");
+      var error = new SchrodingersError();
       this.sinon.stub(Raven, 'isSetup').returns(true);
-      this.sinon.stub(Raven, 'captureMessage');
-      Raven.captureException({}, {foo: 'bar'});
-      assert.isTrue(Raven.captureMessage.calledOnce);
+      this.sinon.stub(Raven, '_handleStackInfo');
+      this.sinon.spy(Raven, '_getCaptureExceptionOptionsFromPlainObject');
+      Raven.captureException(error, {foo: 'bar'});
+      assert.isTrue(Raven._handleStackInfo.calledOnce);
+      assert.isFalse(Raven._getCaptureExceptionOptionsFromPlainObject.called);
     });
 
     it('should call handleStackInfo', function() {
@@ -3075,6 +3187,70 @@ describe('Raven (public API)', function() {
       this.sinon.stub(Raven, '_handleStackInfo');
       assert.doesNotThrow(function() {
         Raven.captureException(new Error('err'));
+      });
+    });
+
+    it('should serialize non-error exceptions', function(done) {
+      this.sinon.stub(Raven, 'isSetup').returns(true);
+      this.sinon.stub(Raven, '_send').callsFake(function stubbedSend(kwargs) {
+        kwargs.message.should.equal(
+          'Non-Error exception captured with keys: aKeyOne, bKeyTwo, cKeyThree, dKeyFour\u2026'
+        );
+
+        var serialized = kwargs.extra.__serialized__;
+        var fn;
+
+        // Yes, I know, it's ugly but...
+        // unfortunately older browsers are not capable of extracting method names
+        // therefore we have to use `oneOf` here
+        fn = serialized.eKeyFive;
+        delete serialized.eKeyFive;
+        assert.oneOf(fn, ['[Function: foo]', '[Function]']);
+
+        fn = serialized.fKeySix.levelTwo.levelThreeAnonymousFunction;
+        delete serialized.fKeySix.levelTwo.levelThreeAnonymousFunction;
+        assert.oneOf(fn, ['[Function: levelThreeAnonymousFunction]', '[Function]']);
+
+        fn = serialized.fKeySix.levelTwo.levelThreeNamedFunction;
+        delete serialized.fKeySix.levelTwo.levelThreeNamedFunction;
+        assert.oneOf(fn, ['[Function: bar]', '[Function]']);
+
+        assert.deepEqual(serialized, {
+          aKeyOne: 'a',
+          bKeyTwo: 42,
+          cKeyThree: {},
+          dKeyFour: ['d'],
+          fKeySix: {
+            levelTwo: {
+              levelThreeObject: '[Object]',
+              levelThreeArray: '[Array]',
+              levelThreeString: 'foo',
+              levelThreeNumber: 42
+            }
+          }
+        });
+
+        done();
+      });
+
+      Raven.captureException({
+        aKeyOne: 'a',
+        bKeyTwo: 42,
+        cKeyThree: {},
+        dKeyFour: ['d'],
+        eKeyFive: function foo() {},
+        fKeySix: {
+          levelTwo: {
+            levelThreeObject: {
+              enough: 42
+            },
+            levelThreeArray: [42],
+            levelThreeAnonymousFunction: function() {},
+            levelThreeNamedFunction: function bar() {},
+            levelThreeString: 'foo',
+            levelThreeNumber: 42
+          }
+        }
       });
     });
   });
